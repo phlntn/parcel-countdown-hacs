@@ -747,7 +747,7 @@ const STYLES = `
     display: flex;
     align-items: center;
     gap: 12px;
-    padding: 8px 16px;
+    padding: 10px 16px;
     min-height: 40px;
     box-sizing: border-box;
   }
