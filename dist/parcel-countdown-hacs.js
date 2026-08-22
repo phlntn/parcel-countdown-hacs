@@ -754,6 +754,7 @@ const STYLES = `
 
   .count {
     flex: 0 0 auto;
+    margin-left: -4px;
     min-width: calc(var(--pcc-number-size, 32px) * 1.2);
     text-align: center;
     font-size: var(--pcc-number-size, 32px);
