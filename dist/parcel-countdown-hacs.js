@@ -1,0 +1,987 @@
+/**
+ * parcel-countdown-card
+ *
+ * A Home Assistant custom Lovelace card that renders incoming packages from the
+ * `parcel-ha` integration as a countdown list: a large day-count on the left,
+ * the package name on the right.
+ *
+ * Zero dependencies, zero build step. Plain ES module, vanilla custom element.
+ */
+
+const CARD_TYPE = 'parcel-countdown-card';
+const EDITOR_TYPE = 'parcel-countdown-card-editor';
+
+/* ------------------------------------------------------------------------- *
+ * Constants
+ * ------------------------------------------------------------------------- */
+
+/** Status codes published by the Parcel App API via `parcel-ha`. */
+const STATUS = {
+  0: { label: 'Delivered', alert: false },
+  1: { label: 'Stalled', alert: true },
+  2: { label: 'In transit', alert: false },
+  3: { label: 'Awaiting pickup', alert: false },
+  4: { label: 'Out for delivery', alert: false },
+  5: { label: 'Not found', alert: true },
+  6: { label: 'Failed attempt', alert: true },
+  7: { label: 'Exception', alert: true },
+  8: { label: 'Label created', alert: false },
+};
+
+const DELIVERED = 0;
+
+const DEFAULTS = {
+  entity: 'sensor.parcel_raw_shipment_data',
+  columns: 1,
+  max: 0,
+  number_size: 32,
+  show_no_eta: true,
+  show_delivered: false,
+  carriers: {},
+};
+
+const DAY_MS = 86400000;
+
+/** Config bounds, shared by `setConfig` and the GUI editor. */
+const LIMITS = {
+  columns: { min: 1, max: 3 },
+  max: { min: 0, max: 999 },
+  number_size: { min: 12, max: 96 },
+};
+
+/**
+ * Carrier tracking pages, keyed by `carrier_code` normalised to lowercase
+ * alphanumerics. Unlisted carriers fall back to a web search for the tracking
+ * number. Extend or override with the `carriers` config option.
+ */
+const TRACKING_URLS = {
+  ups: 'https://www.ups.com/track?loc=en_US&tracknum={tracking}',
+  usps: 'https://tools.usps.com/go/TrackConfirmAction?tLabels={tracking}',
+  fedex: 'https://www.fedex.com/fedextrack/?trknbr={tracking}',
+  dhl: 'https://www.dhl.com/en/express/tracking.html?AWB={tracking}&brand=DHL',
+  dhlexpress: 'https://www.dhl.com/en/express/tracking.html?AWB={tracking}&brand=DHL',
+  royalmail: 'https://www.royalmail.com/track-your-item#/tracking-results/{tracking}',
+  evri: 'https://www.evri.com/track/parcel/{tracking}',
+  hermes: 'https://www.evri.com/track/parcel/{tracking}',
+  dpd: 'https://track.dpd.co.uk/parcels/{tracking}',
+  gls: 'https://gls-group.eu/EU/en/parcel-tracking?match={tracking}',
+  canadapost: 'https://www.canadapost-postescanada.ca/track-reperage/en#/resultList?searchFor={tracking}',
+  auspost: 'https://auspost.com.au/mypost/track/details/{tracking}',
+  postnl: 'https://postnl.nl/tracktrace/?B={tracking}',
+  ontrac: 'https://www.ontrac.com/tracking/?number={tracking}',
+  purolator: 'https://www.purolator.com/en/shipping/tracker?pin={tracking}',
+  yodel: 'https://www.yodel.co.uk/track/{tracking}',
+  tnt: 'https://www.tnt.com/express/en_us/site/tracking.html?searchType=con&cons={tracking}',
+  aramex: 'https://www.aramex.com/us/en/track/results?ShipmentNumber={tracking}',
+};
+
+const TRACKING_FALLBACK = 'https://www.google.com/search?q={tracking}';
+
+/**
+ * `carriers` templates come from user config, so a `javascript:` or `data:`
+ * template must never reach an href.
+ */
+const SAFE_URL = /^https?:\/\//i;
+
+
+/* ------------------------------------------------------------------------- *
+ * Data layer — pure functions, no DOM. Exported for the Node fixture tests.
+ * ------------------------------------------------------------------------- */
+
+/**
+ * Resolve the expected delivery date for one delivery.
+ *
+ * Prefers `timestamp_expected` (epoch, only present when the carrier gave a
+ * full date/time/tz). Otherwise parses `date_expected`, which arrives as
+ * "YYYY-MM-DD HH:MM:SS" with no timezone and must be read as *local* time —
+ * `new Date(string)` is not reliable for that shape across engines.
+ *
+ * @returns {Date|null}
+ */
+export function parseEta(delivery) {
+  if (!delivery || typeof delivery !== 'object') return null;
+
+  const raw = delivery.timestamp_expected;
+  if (raw !== null && raw !== undefined && raw !== '') {
+    const n = Number(raw);
+    if (Number.isFinite(n) && n > 0) {
+      // Epoch seconds vs. milliseconds: anything below ~1973-in-ms is seconds.
+      const date = new Date(n < 1e11 ? n * 1000 : n);
+      if (!Number.isNaN(date.getTime())) return date;
+    }
+  }
+
+  return parseLocalDateTime(delivery.date_expected);
+}
+
+/** Parse "YYYY-MM-DD[ HH:MM[:SS]]" as local wall-clock time. */
+export function parseLocalDateTime(value) {
+  if (typeof value !== 'string') return null;
+  const m = value
+    .trim()
+    .match(/^(\d{4})-(\d{2})-(\d{2})(?:[T ](\d{2}):(\d{2})(?::(\d{2}))?)?/);
+  if (!m) return null;
+
+  const date = new Date(
+    Number(m[1]),
+    Number(m[2]) - 1,
+    Number(m[3]),
+    Number(m[4] || 0),
+    Number(m[5] || 0),
+    Number(m[6] || 0),
+  );
+  if (Number.isNaN(date.getTime())) return null;
+
+  // Reject impossible dates that JS would silently roll over (e.g. 2026-02-31).
+  if (date.getMonth() !== Number(m[2]) - 1 || date.getDate() !== Number(m[3])) {
+    return null;
+  }
+  return date;
+}
+
+/**
+ * End of the delivery window, expressed on the same clock as `eta`.
+ *
+ * `eta` may come from `timestamp_expected` — an absolute instant — while
+ * `date_expected_end` is local wall-clock text with no timezone. Using them
+ * together mixes two clocks and can be hours out, so when both ends of the
+ * window are wall-clock, carry the window's duration onto `eta` instead.
+ *
+ * @returns {Date|null}
+ */
+export function etaWindowEnd(delivery, eta) {
+  if (!delivery || typeof delivery !== 'object') return null;
+  if (!(eta instanceof Date) || Number.isNaN(eta.getTime())) return null;
+
+  const end = parseLocalDateTime(delivery.date_expected_end);
+  if (!end) return null;
+
+  const start = parseLocalDateTime(delivery.date_expected);
+  if (start) {
+    const span = end.getTime() - start.getTime();
+    return span > 0 ? new Date(eta.getTime() + span) : null;
+  }
+
+  // No wall-clock start to measure against; only usable if it stands on its own.
+  return end.getTime() > eta.getTime() ? end : null;
+}
+
+/** True when the ETA carries a meaningful time-of-day, not just a date. */
+export function etaHasTime(delivery) {
+  if (!delivery || typeof delivery !== 'object') return false;
+  const raw = delivery.timestamp_expected;
+  if (raw !== null && raw !== undefined && raw !== '' && Number.isFinite(Number(raw))) {
+    return true;
+  }
+  return /[T ]\d{2}:\d{2}/.test(String(delivery.date_expected || '')) &&
+    !/[T ]00:00(:00)?$/.test(String(delivery.date_expected || '').trim());
+}
+
+/**
+ * Calendar-day difference between two dates, measured at local midnight, so
+ * "tomorrow at 00:30" is 1 day away rather than 0. DST-safe via rounding.
+ *
+ * @returns {number|null}
+ */
+export function daysUntil(date, now = new Date()) {
+  if (!(date instanceof Date) || Number.isNaN(date.getTime())) return null;
+  const from = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime();
+  const to = new Date(date.getFullYear(), date.getMonth(), date.getDate()).getTime();
+  return Math.round((to - from) / DAY_MS);
+}
+
+/** Most recent tracking event, tolerating unsorted or undated event arrays. */
+export function latestEvent(delivery) {
+  const events = delivery && Array.isArray(delivery.events) ? delivery.events : [];
+  if (!events.length) return null;
+
+  let best = null;
+  let bestTime = -Infinity;
+  for (const event of events) {
+    if (!event || typeof event !== 'object') continue;
+    const parsed = parseLocalDateTime(event.date);
+    const time = parsed ? parsed.getTime() : -Infinity;
+    if (best === null || time > bestTime) {
+      best = event;
+      bestTime = time;
+    }
+  }
+  return best;
+}
+
+/**
+ * Turn the raw `deliveries` attribute into sorted, filtered view rows.
+ *
+ * Sort order: soonest ETA first, undated packages last (by name).
+ *
+ * @returns {Array<{id:string,name:string,days:number|null,eta:Date|null,
+ *   hasTime:boolean,code:number|null,carrier:string,tracking:string,
+ *   event:object|null,window:Date|null}>}
+ */
+export function buildRows(deliveries, config = {}, now = new Date()) {
+  const list = Array.isArray(deliveries) ? deliveries : [];
+  const showDelivered = config.show_delivered === true;
+  const showNoEta = config.show_no_eta !== false;
+
+  const rows = [];
+  list.forEach((delivery, index) => {
+    if (!delivery || typeof delivery !== 'object') return;
+
+    const code = Number.isFinite(Number(delivery.status_code))
+      ? Number(delivery.status_code)
+      : null;
+    if (code === DELIVERED && !showDelivered) return;
+
+    const eta = parseEta(delivery);
+    if (eta === null && !showNoEta) return;
+
+    const tracking = String(delivery.tracking_number || '').trim();
+    const name = String(delivery.description || '').trim() || tracking || 'Package';
+
+    rows.push({
+      id: tracking || `${name}-${index}`,
+      name,
+      days: daysUntil(eta, now),
+      eta,
+      hasTime: etaHasTime(delivery),
+      window: etaWindowEnd(delivery, eta),
+      code,
+      carrier: String(delivery.carrier_code || '').trim(),
+      tracking,
+      event: latestEvent(delivery),
+    });
+  });
+
+  rows.sort((a, b) => {
+    if (a.eta && b.eta) return a.eta - b.eta || a.name.localeCompare(b.name);
+    if (a.eta) return -1;
+    if (b.eta) return 1;
+    return a.name.localeCompare(b.name);
+  });
+
+  const max = Number(config.max) || 0;
+  return max > 0 ? rows.slice(0, max) : rows;
+}
+
+/**
+ * Why a non-empty `deliveries` array produced no visible rows.
+ */
+export function describeFilters(deliveries, config = {}) {
+  const list = Array.isArray(deliveries) ? deliveries.filter(Boolean) : [];
+  const delivered = list.filter((d) => Number(d.status_code) === DELIVERED).length;
+  const noEta = list.filter(
+    (d) => Number(d.status_code) !== DELIVERED && parseEta(d) === null,
+  ).length;
+
+  const parts = [];
+  if (delivered && config.show_delivered !== true) {
+    parts.push(`${delivered} delivered`);
+  }
+  if (noEta && config.show_no_eta === false) {
+    parts.push(`${noEta} with no delivery estimate`);
+  }
+  if (!parts.length) {
+    return `All ${list.length} package${list.length === 1 ? ' is' : 's are'} hidden.`;
+  }
+  return `${parts.join(' and ')} hidden by this card's settings.`;
+}
+
+/**
+ * Decide what the card should show for a given entity state: either rows, or a
+ * message naming what is wrong and what to do about it.
+ *
+ * @returns {{rows: Array, message: {text: string, hint: string, alert: boolean}|null}}
+ */
+export function resolveView(entityId, state, config = {}, now = new Date()) {
+  if (!state) {
+    return {
+      rows: [],
+      message: {
+        text: `Entity not found: ${entityId}`,
+        hint:
+          'It does not exist, or it is disabled. parcel-ha ships the raw ' +
+          'shipment sensor disabled by default — enable it under Settings → ' +
+          'Devices & services → Parcel App → show disabled entities.',
+        alert: true,
+      },
+    };
+  }
+
+  if (state.state === 'unavailable' || state.state === 'unknown') {
+    return {
+      rows: [],
+      message: {
+        text: `${entityId} is ${state.state}`,
+        hint: 'The Parcel App integration is not reporting data right now.',
+        alert: true,
+      },
+    };
+  }
+
+  const deliveries = state.attributes ? state.attributes.deliveries : undefined;
+  if (!Array.isArray(deliveries)) {
+    return {
+      rows: [],
+      message: {
+        text: `${entityId} has no "deliveries" attribute`,
+        hint:
+          'This card reads the package list from that attribute. Point it at ' +
+          'the Parcel raw shipment data sensor — the active/recent shipment ' +
+          'sensors only publish a count.',
+        alert: true,
+      },
+    };
+  }
+
+  const rows = buildRows(deliveries, config, now);
+  if (rows.length) return { rows, message: null };
+
+  if (!deliveries.length) {
+    return {
+      rows,
+      message: {
+        text: 'No packages',
+        hint: 'The Parcel App is not tracking anything right now.',
+        alert: false,
+      },
+    };
+  }
+
+  return {
+    rows,
+    message: {
+      text: 'Nothing to show',
+      hint: describeFilters(deliveries, config),
+      alert: false,
+    },
+  };
+}
+
+/** `carrier_code` reduced to lowercase alphanumerics, so "Royal-Mail" == "royalmail". */
+export function normalizeCarrier(code) {
+  return String(code === null || code === undefined ? '' : code)
+    .toLowerCase()
+    .replace(/[^a-z0-9]/g, '');
+}
+
+/**
+ * The carrier's tracking page for one row, or null when there is no tracking
+ * number to look up. `carriers` (from config) overrides the built-in map, and
+ * its keys are normalised the same way, so casing and punctuation do not matter.
+ *
+ * @returns {string|null}
+ */
+export function trackingUrl(row, carriers) {
+  if (!row || !row.tracking) return null;
+
+  const overrides = {};
+  if (carriers && typeof carriers === 'object') {
+    Object.keys(carriers).forEach((key) => {
+      if (typeof carriers[key] === 'string' && carriers[key]) {
+        overrides[normalizeCarrier(key)] = carriers[key];
+      }
+    });
+  }
+
+  const key = normalizeCarrier(row.carrier);
+  const template = overrides[key] || TRACKING_URLS[key] || TRACKING_FALLBACK;
+  const url = String(template)
+    .replace(/\{tracking\}/g, encodeURIComponent(row.tracking))
+    .replace(/\{carrier\}/g, encodeURIComponent(row.carrier || ''));
+
+  return SAFE_URL.test(url) ? url : null;
+}
+
+/** Big-number glyph: `0` today, `!` overdue, `–` no estimate, `✓` delivered. */
+export function countdownGlyph(row) {
+  if (row.code === DELIVERED) return '✓';
+  if (row.days === null) return '–';
+  if (row.days < 0) return '!';
+  return String(row.days);
+}
+
+/** Tone class for the big number. */
+export function countdownTone(row) {
+  if (row.code === DELIVERED) return 'done';
+  if (row.days === null) return 'muted';
+  if (row.days < 0) return 'alert';
+  if (row.days <= 1) return 'soon';
+  return '';
+}
+
+/**
+ * Best guess at the entity holding the package list, for the card picker.
+ *
+ * `parcel-ha` also publishes `parcel_active_shipment` and
+ * `parcel_recent_shipment`, which match on name but carry only a count, so a
+ * `deliveries` array beats a name match.
+ */
+export function findParcelEntity(hass) {
+  const states = (hass && hass.states) || {};
+  const ids = Object.keys(states);
+
+  const hasDeliveries = (id) =>
+    states[id] && states[id].attributes && Array.isArray(states[id].attributes.deliveries);
+
+  return (
+    ids.find((id) => id === DEFAULTS.entity && hasDeliveries(id)) ||
+    ids.find((id) => id.startsWith('sensor.') && hasDeliveries(id)) ||
+    ids.find((id) => id === DEFAULTS.entity) ||
+    ids.find((id) => id.startsWith('sensor.') && id.includes('parcel')) ||
+    DEFAULTS.entity
+  );
+}
+
+/* ------------------------------------------------------------------------- *
+ * Formatting helpers
+ * ------------------------------------------------------------------------- */
+
+function localeOf(hass) {
+  return (hass && hass.locale && hass.locale.language) || undefined;
+}
+
+function formatDate(date, hass) {
+  try {
+    return new Intl.DateTimeFormat(localeOf(hass), {
+      weekday: 'short',
+      day: 'numeric',
+      month: 'short',
+    }).format(date);
+  } catch (err) {
+    return date.toDateString();
+  }
+}
+
+function formatTime(date, hass) {
+  try {
+    return new Intl.DateTimeFormat(localeOf(hass), {
+      hour: 'numeric',
+      minute: '2-digit',
+    }).format(date);
+  } catch (err) {
+    return '';
+  }
+}
+
+/** Human-readable ETA line, e.g. "Tomorrow, 09:00 – 13:00". */
+function formatEta(row, hass) {
+  if (!row.eta) return 'No delivery estimate';
+
+  let label;
+  if (row.days === 0) label = 'Today';
+  else if (row.days === 1) label = 'Tomorrow';
+  else if (row.days === -1) label = 'Yesterday';
+  else label = formatDate(row.eta, hass);
+
+  if (!row.hasTime) return label;
+
+  let time = formatTime(row.eta, hass);
+  if (row.window) {
+    const end = formatTime(row.window, hass);
+    if (end) time = `${time} – ${end}`;
+  }
+  return time ? `${label}, ${time}` : label;
+}
+
+function statusLabel(code) {
+  return (STATUS[code] && STATUS[code].label) || 'Unknown status';
+}
+
+function statusIsAlert(code) {
+  return Boolean(STATUS[code] && STATUS[code].alert);
+}
+
+function formatEventDate(value, hass) {
+  const date = parseLocalDateTime(value);
+  if (!date) return '';
+  return `${formatDate(date, hass)}, ${formatTime(date, hass)}`;
+}
+
+function escapeHtml(value) {
+  return String(value === null || value === undefined ? '' : value).replace(
+    /[&<>"']/g,
+    (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]),
+  );
+}
+
+/** Clamp a config value to its declared bounds, falling back to the default. */
+function clampTo(key, value) {
+  const n = Number(value);
+  if (!Number.isFinite(n)) return DEFAULTS[key];
+  return Math.min(LIMITS[key].max, Math.max(LIMITS[key].min, Math.round(n)));
+}
+
+/* ------------------------------------------------------------------------- *
+ * Styles — HA CSS custom properties only, no hardcoded colours or font stacks.
+ * ------------------------------------------------------------------------- */
+
+const STYLES = `
+  :host { display: block; }
+
+  ha-card {
+    overflow: hidden;
+  }
+
+  .card-header {
+    color: var(--ha-card-header-color, var(--primary-text-color));
+    font-size: var(--ha-card-header-font-size, 24px);
+    font-weight: var(--ha-font-weight-normal, 400);
+    line-height: 1.2em;
+    letter-spacing: -0.012em;
+    padding: 12px 16px 4px;
+  }
+
+  .grid {
+    display: grid;
+    grid-template-columns: repeat(var(--pcc-columns, 1), minmax(0, 1fr));
+    column-gap: 8px;
+    padding: 4px 0;
+  }
+
+  .row {
+    display: block;
+    border-top: 1px solid var(--divider-color);
+    color: inherit;
+    text-decoration: none;
+    outline: none;
+  }
+  a.row { cursor: pointer; }
+
+  a.row:hover .line { background: var(--secondary-background-color); }
+  /* Hide the divider above the first row of every column. */
+  .grid.cols-1 .row:nth-child(-n + 1),
+  .grid.cols-2 .row:nth-child(-n + 2),
+  .grid.cols-3 .row:nth-child(-n + 3) { border-top: none; }
+
+  .row:focus-visible .line {
+    background: var(--secondary-background-color);
+  }
+
+  .line {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    padding: 8px 16px;
+    min-height: 40px;
+    box-sizing: border-box;
+  }
+
+  .count {
+    flex: 0 0 auto;
+    min-width: calc(var(--pcc-number-size, 32px) * 1.2);
+    text-align: center;
+    font-size: var(--pcc-number-size, 32px);
+    line-height: 1;
+    font-weight: var(--ha-font-weight-medium, 500);
+    letter-spacing: -0.04em;
+    color: var(--primary-text-color);
+    font-variant-numeric: tabular-nums;
+  }
+  .count.soon { color: var(--primary-color); }
+  .count.alert { color: var(--error-color); }
+  .count.done,
+  .count.muted { color: var(--secondary-text-color); }
+
+  .text {
+    flex: 1 1 auto;
+    min-width: 0;
+  }
+
+  .name {
+    color: var(--primary-text-color);
+    font-size: var(--ha-font-size-m, 14px);
+    font-weight: var(--ha-font-weight-medium, 500);
+    line-height: 1.3;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .sub {
+    color: var(--secondary-text-color);
+    font-size: var(--ha-font-size-s, 12px);
+    line-height: 1.35;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .sub.alert { color: var(--error-color); }
+
+  .chevron {
+    flex: 0 0 auto;
+    color: var(--secondary-text-color);
+    font-size: 12px;
+    line-height: 1;
+  }
+  .row:not(a) .chevron { visibility: hidden; }
+
+  .empty {
+    padding: 16px;
+  }
+
+  .empty-text {
+    color: var(--primary-text-color);
+    font-size: var(--ha-font-size-m, 14px);
+    line-height: 1.4;
+  }
+  .empty.alert .empty-text { color: var(--error-color); }
+
+  .empty-hint {
+    color: var(--secondary-text-color);
+    font-size: var(--ha-font-size-s, 12px);
+    line-height: 1.45;
+    margin-top: 6px;
+    max-width: 46em;
+  }
+`;
+
+/* ------------------------------------------------------------------------- *
+ * The card
+ * ------------------------------------------------------------------------- */
+
+class ParcelCountdownCard extends HTMLElement {
+  constructor() {
+    super();
+    this.attachShadow({ mode: 'open' });
+    this._config = null;
+    this._hass = null;
+    this._signature = null;
+    this._timer = null;
+    this._built = false;
+  }
+
+  static getConfigElement() {
+    return document.createElement(EDITOR_TYPE);
+  }
+
+  static getStubConfig(hass) {
+    return { type: `custom:${CARD_TYPE}`, entity: findParcelEntity(hass), title: 'Packages' };
+  }
+
+  setConfig(config) {
+    if (!config || typeof config !== 'object') {
+      throw new Error('Invalid configuration');
+    }
+    if (!config.entity) {
+      throw new Error('You need to define an entity');
+    }
+    if (typeof config.entity !== 'string' || !config.entity.startsWith('sensor.')) {
+      throw new Error('`entity` must be a sensor entity');
+    }
+
+    this._config = {
+      ...DEFAULTS,
+      ...config,
+      columns: clampTo('columns', config.columns),
+      max: clampTo('max', config.max),
+      number_size: clampTo('number_size', config.number_size),
+      show_no_eta: config.show_no_eta !== false,
+      show_delivered: config.show_delivered === true,
+      carriers:
+        config.carriers && typeof config.carriers === 'object' ? config.carriers : {},
+    };
+    this._signature = null;
+    this._render();
+  }
+
+  set hass(hass) {
+    this._hass = hass;
+    this._render();
+  }
+
+  get hass() {
+    return this._hass;
+  }
+
+  connectedCallback() {
+    // Day counts roll over at midnight even when no state change arrives.
+    if (!this._timer) {
+      this._timer = setInterval(() => this._render(), 60000);
+    }
+  }
+
+  disconnectedCallback() {
+    if (this._timer) {
+      clearInterval(this._timer);
+      this._timer = null;
+    }
+  }
+
+  getCardSize() {
+    const rows = this._rows ? this._rows.length : 3;
+    const columns = this._config ? this._config.columns : 1;
+    return 1 + Math.ceil(rows / columns);
+  }
+
+  getGridOptions() {
+    return { rows: 'auto', columns: 'full', min_columns: 6 };
+  }
+
+  /* -- rendering -- */
+
+  _render() {
+    if (!this._config) return;
+
+    // Nothing to say until the first hass update arrives.
+    const view = this._hass
+      ? resolveView(
+          this._config.entity,
+          this._hass.states ? this._hass.states[this._config.entity] : undefined,
+          this._config,
+          new Date(),
+        )
+      : { rows: [], message: null };
+    const { rows, message } = view;
+
+    this._rows = rows;
+
+    const signature = JSON.stringify([
+      this._config,
+      message,
+      rows.map((r) => [r.id, r.name, r.days, r.code, r.carrier, r.tracking,
+        r.eta ? r.eta.getTime() : null, r.hasTime,
+        r.window ? r.window.getTime() : null,
+        r.event ? [r.event.event, r.event.date, r.event.location, r.event.additional] : null]),
+    ]);
+    if (this._built && signature === this._signature) return;
+    this._signature = signature;
+
+    this._build();
+    this._paint(rows, message);
+  }
+
+  _build() {
+    if (this._built) return;
+    const style = document.createElement('style');
+    style.textContent = STYLES;
+    this._card = document.createElement('ha-card');
+    this.shadowRoot.replaceChildren(style, this._card);
+    this._built = true;
+  }
+
+  _paint(rows, message) {
+    const cfg = this._config;
+    const header = cfg.title
+      ? `<div class="card-header">${escapeHtml(cfg.title)}</div>`
+      : '';
+
+    let body;
+    if (message) {
+      const hint = message.hint
+        ? `<div class="empty-hint">${escapeHtml(message.hint)}</div>`
+        : '';
+      body =
+        `<div class="empty${message.alert ? ' alert' : ''}">` +
+        `<div class="empty-text">${escapeHtml(message.text)}</div>${hint}</div>`;
+    } else if (!rows.length) {
+      body = '';
+    } else {
+      body =
+        `<div class="grid cols-${cfg.columns}">` +
+        rows.map((row) => this._rowHtml(row)).join('') +
+        '</div>';
+    }
+
+    this._card.style.setProperty('--pcc-columns', String(cfg.columns));
+    this._card.style.setProperty('--pcc-number-size', `${cfg.number_size}px`);
+    this._card.innerHTML = header + body;
+  }
+
+  _rowHtml(row) {
+    const hass = this._hass;
+    const sub = `${statusLabel(row.code)} · ${formatEta(row, hass)}`;
+    const href = trackingUrl(row, this._config.carriers);
+
+    // Tracking number and last event live in the tooltip.
+    const tooltip = [row.name, sub];
+    if (row.tracking) {
+      tooltip.push(row.carrier ? `${row.tracking} (${row.carrier})` : row.tracking);
+    }
+    if (row.event) {
+      const parts = [
+        String(row.event.event || row.event.additional || '').trim(),
+        String(row.event.location || '').trim(),
+        formatEventDate(row.event.date, hass),
+      ].filter(Boolean);
+      if (parts.length) tooltip.push(parts.join(' · '));
+    }
+
+    const open = href
+      ? `<a class="row" href="${escapeHtml(href)}" target="_blank" rel="noopener noreferrer"`
+      : '<div class="row"';
+
+    return (
+      `${open} title="${escapeHtml(tooltip.join('\n'))}" ` +
+      `aria-label="${escapeHtml(`${row.name}, ${sub}`)}">` +
+      '<div class="line">' +
+      `<div class="count ${countdownTone(row)}">${countdownGlyph(row)}</div>` +
+      '<div class="text">' +
+      `<div class="name">${escapeHtml(row.name)}</div>` +
+      `<div class="sub${statusIsAlert(row.code) ? ' alert' : ''}">${escapeHtml(sub)}</div>` +
+      '</div>' +
+      '<div class="chevron">❯</div>' +
+      '</div>' +
+      `${href ? '</a>' : '</div>'}`
+    );
+  }
+}
+
+/* ------------------------------------------------------------------------- *
+ * GUI editor — built on HA's own `ha-form` + selectors.
+ * ------------------------------------------------------------------------- */
+
+const FORM_SCHEMA = [
+  { name: 'entity', required: true, selector: { entity: { domain: 'sensor' } } },
+  { name: 'title', selector: { text: {} } },
+  {
+    type: 'grid',
+    name: '',
+    schema: [
+      {
+        name: 'columns',
+        selector: { number: { ...LIMITS.columns, mode: 'box' } },
+      },
+      { name: 'max', selector: { number: { ...LIMITS.max, mode: 'box' } } },
+    ],
+  },
+  {
+    name: 'number_size',
+    selector: {
+      number: { ...LIMITS.number_size, step: 2, mode: 'slider', unit_of_measurement: 'px' },
+    },
+  },
+  {
+    type: 'grid',
+    name: '',
+    schema: [
+      { name: 'show_no_eta', selector: { boolean: {} } },
+      { name: 'show_delivered', selector: { boolean: {} } },
+    ],
+  },
+  { name: 'carriers', selector: { object: {} } },
+];
+
+const FORM_LABELS = {
+  entity: 'Parcel entity (required)',
+  title: 'Title',
+  columns: 'Columns',
+  max: 'Max packages (0 = all)',
+  number_size: 'Number size',
+  show_no_eta: 'Show packages with no ETA',
+  show_delivered: 'Show delivered packages',
+  carriers: 'Carrier tracking URLs (advanced) — carrier_code: template with {tracking}',
+};
+
+class ParcelCountdownCardEditor extends HTMLElement {
+  constructor() {
+    super();
+    this.attachShadow({ mode: 'open' });
+    this._config = {};
+    this._hass = null;
+    this._form = null;
+  }
+
+  setConfig(config) {
+    this._config = { ...DEFAULTS, ...(config || {}) };
+    this._render();
+  }
+
+  set hass(hass) {
+    this._hass = hass;
+    if (this._form) this._form.hass = hass;
+  }
+
+  get hass() {
+    return this._hass;
+  }
+
+  connectedCallback() {
+    this._render();
+  }
+
+  async _render() {
+    if (!this.shadowRoot) return;
+    if (!customElements.get('ha-form')) {
+      // The card-editor dialog defines `ha-form`.
+      await customElements.whenDefined('ha-form');
+      if (!this.isConnected) return;
+    }
+
+    if (!this._form) {
+      this._form = document.createElement('ha-form');
+      this._form.computeLabel = (schema) => FORM_LABELS[schema.name] || schema.name;
+      this._form.addEventListener('value-changed', (ev) => this._valueChanged(ev));
+      this.shadowRoot.replaceChildren(this._form);
+    }
+
+    this._form.hass = this._hass;
+    this._form.schema = FORM_SCHEMA;
+    this._form.data = this._config;
+  }
+
+  _valueChanged(ev) {
+    ev.stopPropagation();
+    const value = { ...this._config, ...(ev.detail ? ev.detail.value : {}) };
+
+    // Drop empty/defaulted keys so the YAML round-trip stays clean.
+    const config = { type: `custom:${CARD_TYPE}`, entity: value.entity };
+    if (value.title !== undefined && String(value.title).trim() !== '') {
+      config.title = String(value.title);
+    }
+    const columns = clampTo('columns', value.columns);
+    if (columns !== DEFAULTS.columns) config.columns = columns;
+
+    const max = clampTo('max', value.max);
+    if (max !== DEFAULTS.max) config.max = max;
+
+    const size = clampTo('number_size', value.number_size);
+    if (size !== DEFAULTS.number_size) config.number_size = size;
+
+    if (value.show_no_eta === false) config.show_no_eta = false;
+    if (value.show_delivered === true) config.show_delivered = true;
+
+    if (
+      value.carriers &&
+      typeof value.carriers === 'object' &&
+      Object.keys(value.carriers).length
+    ) {
+      config.carriers = value.carriers;
+    }
+
+    this._config = { ...DEFAULTS, ...config };
+    this.dispatchEvent(
+      new CustomEvent('config-changed', {
+        detail: { config },
+        bubbles: true,
+        composed: true,
+      }),
+    );
+  }
+}
+
+/* ------------------------------------------------------------------------- *
+ * Registration
+ * ------------------------------------------------------------------------- */
+
+if (!customElements.get(CARD_TYPE)) {
+  customElements.define(CARD_TYPE, ParcelCountdownCard);
+}
+if (!customElements.get(EDITOR_TYPE)) {
+  customElements.define(EDITOR_TYPE, ParcelCountdownCardEditor);
+}
+
+window.customCards = window.customCards || [];
+if (!window.customCards.some((card) => card.type === CARD_TYPE)) {
+  window.customCards.push({
+    type: CARD_TYPE,
+    name: 'Parcel Countdown Card',
+    description: 'Incoming packages as a countdown list, from the parcel-ha integration.',
+    preview: true,
+    documentationURL: 'https://github.com/phlntn/parcel-countdown-hacs',
+  });
+}
+
+console.info(
+  '%c PARCEL-COUNTDOWN-CARD ',
+  'color: white; background: #3f51b5; font-weight: 700;',
+);

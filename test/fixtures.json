@@ -1,0 +1,100 @@
+{
+  "deliveries": [
+    {
+      "description": "Mechanical keyboard switches",
+      "tracking_number": "1Z999AA10123456784",
+      "carrier_code": "ups",
+      "status_code": 2,
+      "date_expected": "2026-08-22 00:00:00",
+      "events": [
+        { "event": "Departed facility", "date": "2026-08-19 04:12:00", "location": "Castle Donington, GB", "additional": "" },
+        { "event": "Arrived at facility", "date": "2026-08-20 06:30:00", "location": "Tamworth, GB", "additional": "" }
+      ]
+    },
+    {
+      "description": "Raspberry Pi HAT",
+      "tracking_number": "JD0002234567890",
+      "carrier_code": "dhl",
+      "status_code": 4,
+      "date_expected": "2026-08-20 09:00:00",
+      "date_expected_end": "2026-08-20 13:00:00",
+      "timestamp_expected": 1787216400,
+      "events": [
+        { "event": "Out for delivery", "date": "2026-08-20 07:02:00", "location": "Local depot", "additional": "" }
+      ]
+    },
+    {
+      "description": "A package with an extremely long user-supplied description that should be ellipsised rather than wrapping and blowing out the row height",
+      "tracking_number": "LX123456789GB",
+      "carrier_code": "royal-mail",
+      "status_code": 8,
+      "events": []
+    },
+    {
+      "description": "Late birthday present",
+      "tracking_number": "CP987654321US",
+      "carrier_code": "usps",
+      "status_code": 1,
+      "date_expected": "2026-08-17 00:00:00",
+      "events": [
+        { "event": "In transit, arriving late", "date": "2026-08-18 11:00:00", "location": "ISC New York", "additional": "Delay" }
+      ]
+    },
+    {
+      "description": "Coffee beans",
+      "tracking_number": "AB000111222CH",
+      "carrier_code": "dpd",
+      "status_code": 0,
+      "date_expected": "2026-08-18 00:00:00",
+      "events": [{ "event": "Delivered", "date": "2026-08-18 14:22:00", "location": "Front porch", "additional": "" }]
+    },
+    {
+      "tracking_number": "NODESC0001",
+      "carrier_code": "fedex",
+      "status_code": 7,
+      "date_expected": "2026-08-25 00:00:00",
+      "events": [{ "event": "Customs hold", "date": "2026-08-19 09:00:00", "location": "Stansted", "additional": "Duty due" }]
+    },
+    {
+      "description": "Failed attempt parcel",
+      "tracking_number": "FA0002",
+      "carrier_code": "evri",
+      "status_code": 6,
+      "date_expected": "2026-08-21 00:00:00",
+      "events": []
+    },
+    {
+      "description": "Malformed date parcel",
+      "tracking_number": "BAD0003",
+      "carrier_code": "gls",
+      "status_code": 2,
+      "date_expected": "not-a-date",
+      "events": []
+    },
+    {
+      "description": "Impossible date parcel",
+      "tracking_number": "BAD0004",
+      "carrier_code": "gls",
+      "status_code": 2,
+      "date_expected": "2026-02-31 00:00:00",
+      "events": []
+    },
+    {
+      "description": "Awaiting pickup at locker",
+      "tracking_number": "PU0005",
+      "carrier_code": "inpost",
+      "status_code": 3,
+      "date_expected": "2026-08-20 18:00:00",
+      "events": [{ "event": "Ready for collection", "date": "2026-08-20 12:00:00", "location": "Locker 42", "additional": "" }]
+    },
+    { "tracking_number": "NULLROW", "carrier_code": "", "status_code": 5, "events": null },
+    {
+      "description": "Epoch milliseconds parcel",
+      "tracking_number": "MS0006",
+      "carrier_code": "ups",
+      "status_code": 2,
+      "timestamp_expected": 1787616000000,
+      "events": []
+    }
+  ]
+}
