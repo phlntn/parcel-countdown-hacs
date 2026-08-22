@@ -15,20 +15,25 @@ const EDITOR_TYPE = 'parcel-countdown-card-editor';
  * Constants
  * ------------------------------------------------------------------------- */
 
-/** Status codes published by the Parcel App API via `parcel-ha`. */
+/**
+ * Status codes published by the Parcel App API via `parcel-ha`, each with the
+ * tone it lends a row. Red is reserved for something actually going wrong;
+ * amber means it needs a nudge; a parcel the carrier cannot find stays quiet.
+ */
 const STATUS = {
-  0: { label: 'Delivered', alert: false },
-  1: { label: 'Stalled', alert: true },
-  2: { label: 'In transit', alert: false },
-  3: { label: 'Awaiting pickup', alert: false },
-  4: { label: 'Out for delivery', alert: false },
-  5: { label: 'Not found', alert: true },
-  6: { label: 'Failed attempt', alert: true },
-  7: { label: 'Exception', alert: true },
-  8: { label: 'Label created', alert: false },
+  0: { label: 'Delivered', tone: 'done' },
+  1: { label: 'Stalled', tone: 'warn' },
+  2: { label: 'In transit', tone: '' },
+  3: { label: 'Awaiting pickup', tone: 'warn' },
+  4: { label: 'Out for delivery', tone: '' },
+  5: { label: 'Not found', tone: 'muted' },
+  6: { label: 'Failed attempt', tone: 'alert' },
+  7: { label: 'Exception', tone: 'alert' },
+  8: { label: 'Label created', tone: '' },
 };
 
 const DELIVERED = 0;
+const NOT_FOUND = 5;
 
 const DEFAULTS = {
   entity: 'sensor.parcel_raw_shipment_data',
@@ -115,29 +120,78 @@ export function parseEta(delivery) {
   return parseLocalDateTime(delivery.date_expected);
 }
 
-/** Parse "YYYY-MM-DD[ HH:MM[:SS]]" as local wall-clock time. */
+const MONTHS = {
+  jan: 0, feb: 1, mar: 2, apr: 3, may: 4, jun: 5,
+  jul: 6, aug: 7, sep: 8, oct: 9, nov: 10, dec: 11,
+};
+
+/** Build a local date, rejecting impossible ones JS would silently roll over. */
+function localDate(year, month, day, hour, minute, second) {
+  const date = new Date(year, month, day, hour || 0, minute || 0, second || 0);
+  if (Number.isNaN(date.getTime())) return null;
+  if (date.getMonth() !== month || date.getDate() !== day) return null;
+  return date;
+}
+
+/**
+ * Parse the date shapes `parcel-ha` actually emits. They are not consistent —
+ * even two packages from the same carrier can differ:
+ *
+ *   2026-08-22 07:04:41       `date_expected`, and some event feeds
+ *   August 22, 2026 09:19     FedEx events, 24-hour
+ *   August 22, 2026 7:37 AM   USPS events, 12-hour
+ *
+ * All are timezone-less and read as local wall-clock time. A string that does
+ * carry an offset is handed to the engine so the offset is honoured.
+ *
+ * @returns {Date|null}
+ */
 export function parseLocalDateTime(value) {
   if (typeof value !== 'string') return null;
-  const m = value
-    .trim()
-    .match(/^(\d{4})-(\d{2})-(\d{2})(?:[T ](\d{2}):(\d{2})(?::(\d{2}))?)?/);
-  if (!m) return null;
+  const text = value.trim();
+  if (!text) return null;
 
-  const date = new Date(
-    Number(m[1]),
-    Number(m[2]) - 1,
-    Number(m[3]),
-    Number(m[4] || 0),
-    Number(m[5] || 0),
-    Number(m[6] || 0),
-  );
-  if (Number.isNaN(date.getTime())) return null;
-
-  // Reject impossible dates that JS would silently roll over (e.g. 2026-02-31).
-  if (date.getMonth() !== Number(m[2]) - 1 || date.getDate() !== Number(m[3])) {
-    return null;
+  // Explicit offset or Z: an absolute instant, not wall-clock.
+  if (/\d(?:Z|[+-]\d{2}:?\d{2})$/i.test(text)) {
+    const absolute = new Date(text);
+    return Number.isNaN(absolute.getTime()) ? null : absolute;
   }
-  return date;
+
+  const numeric = text.match(/^(\d{4})-(\d{2})-(\d{2})(?:[T ](\d{2}):(\d{2})(?::(\d{2}))?)?/);
+  if (numeric) {
+    return localDate(
+      Number(numeric[1]),
+      Number(numeric[2]) - 1,
+      Number(numeric[3]),
+      Number(numeric[4] || 0),
+      Number(numeric[5] || 0),
+      Number(numeric[6] || 0),
+    );
+  }
+
+  // "August 22, 2026 09:19" / "Aug 22 2026 7:37 AM" / "August 22, 2026"
+  const worded = text.match(
+    /^([A-Za-z]{3,9})\.?\s+(\d{1,2}),?\s+(\d{4})(?:[,\s]+(\d{1,2}):(\d{2})(?::(\d{2}))?(?:\s*([AaPp])\.?[Mm]?\.?)?)?$/,
+  );
+  if (!worded) return null;
+
+  const month = MONTHS[worded[1].slice(0, 3).toLowerCase()];
+  if (month === undefined) return null;
+
+  let hour = Number(worded[4] || 0);
+  const meridiem = worded[7] && worded[7].toLowerCase();
+  if (meridiem === 'a' && hour === 12) hour = 0;
+  if (meridiem === 'p' && hour < 12) hour += 12;
+  if (hour > 23) return null;
+
+  return localDate(
+    Number(worded[3]),
+    month,
+    Number(worded[2]),
+    hour,
+    Number(worded[5] || 0),
+    Number(worded[6] || 0),
+  );
 }
 
 /**
@@ -170,9 +224,13 @@ export function etaWindowEnd(delivery, eta) {
 /** True when the ETA carries a meaningful time-of-day, not just a date. */
 export function etaHasTime(delivery) {
   if (!delivery || typeof delivery !== 'object') return false;
+
   const raw = delivery.timestamp_expected;
   if (raw !== null && raw !== undefined && raw !== '' && Number.isFinite(Number(raw))) {
-    return true;
+    // Some carriers stamp a date-only estimate as local midnight.
+    const at = parseEta(delivery);
+    if (!at) return false;
+    return at.getHours() !== 0 || at.getMinutes() !== 0 || at.getSeconds() !== 0;
   }
   return /[T ]\d{2}:\d{2}/.test(String(delivery.date_expected || '')) &&
     !/[T ]00:00(:00)?$/.test(String(delivery.date_expected || '').trim());
@@ -191,6 +249,29 @@ export function daysUntil(date, now = new Date()) {
   return Math.round((to - from) / DAY_MS);
 }
 
+/**
+ * Date on a tracking event.
+ *
+ * Unlike `date_expected`, whose shape `parcel-ha` documents, event dates come
+ * from the carriers themselves and vary. Try the documented wall-clock shape
+ * first, then let the engine attempt anything else it recognises — an ISO
+ * string with an offset, say — rather than dropping the event entirely.
+ *
+ * @returns {Date|null}
+ */
+export function eventDate(event) {
+  if (!event || typeof event !== 'object') return null;
+
+  const local = parseLocalDateTime(event.date);
+  if (local) return local;
+
+  if (typeof event.date === 'string' && event.date.trim()) {
+    const parsed = new Date(event.date.trim());
+    if (!Number.isNaN(parsed.getTime())) return parsed;
+  }
+  return null;
+}
+
 /** Most recent tracking event, tolerating unsorted or undated event arrays. */
 export function latestEvent(delivery) {
   const events = delivery && Array.isArray(delivery.events) ? delivery.events : [];
@@ -200,7 +281,7 @@ export function latestEvent(delivery) {
   let bestTime = -Infinity;
   for (const event of events) {
     if (!event || typeof event !== 'object') continue;
-    const parsed = parseLocalDateTime(event.date);
+    const parsed = eventDate(event);
     const time = parsed ? parsed.getTime() : -Infinity;
     if (best === null || time > bestTime) {
       best = event;
@@ -211,15 +292,25 @@ export function latestEvent(delivery) {
 }
 
 /**
- * When a delivered package was delivered: the last tracking event if there is
- * one, otherwise the expected date.
+ * When a delivered package was delivered.
+ *
+ * Scans every event for the newest usable date rather than trusting the last
+ * one to carry it — a carrier that logs its delivery scan without a date would
+ * otherwise hide a perfectly good timestamp sitting on an earlier event.
+ * Falls back to the expected date.
  *
  * @returns {Date|null}
  */
 export function deliveredAt(delivery, eta) {
-  const event = latestEvent(delivery);
-  const stamped = event ? parseLocalDateTime(event.date) : null;
-  return stamped || eta || null;
+  const events = delivery && Array.isArray(delivery.events) ? delivery.events : [];
+
+  let newest = null;
+  for (const event of events) {
+    const at = eventDate(event);
+    if (at && (newest === null || at > newest)) newest = at;
+  }
+
+  return newest || eta || null;
 }
 
 /**
@@ -310,20 +401,37 @@ export function buildRows(deliveries, config = {}, now = new Date()) {
 /**
  * Why a non-empty `deliveries` array produced no visible rows.
  */
-export function describeFilters(deliveries, config = {}) {
+export function describeFilters(deliveries, config = {}, now = new Date()) {
   const list = Array.isArray(deliveries) ? deliveries.filter(Boolean) : [];
-  const delivered = list.filter((d) => Number(d.status_code) === DELIVERED).length;
-  const noEta = list.filter(
-    (d) => Number(d.status_code) !== DELIVERED && parseEta(d) === null,
-  ).length;
+  const hideAfter = Number.isFinite(Number(config.hide_delivered_after))
+    ? Math.max(0, Number(config.hide_delivered_after))
+    : DEFAULTS.hide_delivered_after;
+
+  // Count only what the filters actually dropped, using the same arithmetic
+  // `buildRows` applies, so the hint cannot claim credit for a package that is
+  // simply too old to be interesting.
+  const staleDelivered = list.filter((d) => {
+    if (Number(d.status_code) !== DELIVERED) return false;
+    const settled = deliveredAt(d, parseEta(d));
+    const since = settled ? -daysUntil(settled, now) : 0;
+    return since >= hideAfter;
+  }).length;
+
+  const noEta =
+    config.show_no_eta === false
+      ? list.filter((d) => Number(d.status_code) !== DELIVERED && parseEta(d) === null).length
+      : 0;
 
   const parts = [];
-  if (delivered && Number(config.hide_delivered_after ?? DEFAULTS.hide_delivered_after) >= 0) {
-    parts.push(`${delivered} delivered`);
+  if (staleDelivered) {
+    parts.push(
+      hideAfter === 0
+        ? `${staleDelivered} already delivered`
+        : `${staleDelivered} delivered more than ${hideAfter} day${hideAfter === 1 ? '' : 's'} ago`,
+    );
   }
-  if (noEta && config.show_no_eta === false) {
-    parts.push(`${noEta} with no delivery estimate`);
-  }
+  if (noEta) parts.push(`${noEta} with no delivery estimate`);
+
   if (!parts.length) {
     return `All ${list.length} package${list.length === 1 ? ' is' : 's are'} hidden.`;
   }
@@ -395,7 +503,7 @@ export function resolveView(entityId, state, config = {}, now = new Date()) {
     rows,
     message: {
       text: 'Nothing to show',
-      hint: describeFilters(deliveries, config),
+      hint: describeFilters(deliveries, config, now),
       alert: false,
     },
   };
@@ -436,19 +544,29 @@ export function trackingUrl(row, carriers) {
   return SAFE_URL.test(url) ? url : null;
 }
 
-/** Big-number glyph: `0` today, `!` overdue, `–` no estimate, `✓` delivered. */
+/**
+ * Big-number glyph: `✓` delivered, `?` the carrier cannot find it, `!` overdue,
+ * `–` no estimate, otherwise the day count.
+ */
 export function countdownGlyph(row) {
   if (row.code === DELIVERED) return '✓';
+  if (row.code === NOT_FOUND) return '?';
   if (row.days === null) return '–';
   if (row.days < 0) return '!';
   return String(row.days);
 }
 
-/** Tone class for the big number. */
+/**
+ * Tone class for the big number. Status severity outranks timing, so an
+ * overdue exception stays red rather than softening to amber, and a package
+ * the carrier cannot find stays quiet whatever its dates claim.
+ */
 export function countdownTone(row) {
   if (row.code === DELIVERED) return 'done';
+  if (row.code === NOT_FOUND) return 'muted';
+  if (statusTone(row.code) === 'alert') return 'alert';
   if (row.days === null) return 'muted';
-  if (row.days < 0) return 'alert';
+  if (row.days < 0 || statusTone(row.code) === 'warn') return 'warn';
   if (row.days === 0) return 'soon';
   return '';
 }
@@ -485,11 +603,14 @@ function localeOf(hass) {
 }
 
 function formatDate(date, hass) {
+  // "Sat, Mar 1" is ambiguous once a date leaves the current year.
+  const sameYear = date.getFullYear() === new Date().getFullYear();
   try {
     return new Intl.DateTimeFormat(localeOf(hass), {
       weekday: 'short',
       day: 'numeric',
       month: 'short',
+      ...(sameYear ? {} : { year: 'numeric' }),
     }).format(date);
   } catch (err) {
     return date.toDateString();
@@ -550,12 +671,14 @@ function statusLabel(code) {
   return (STATUS[code] && STATUS[code].label) || 'Unknown status';
 }
 
-function statusIsAlert(code) {
-  return Boolean(STATUS[code] && STATUS[code].alert);
+/** Tone the status alone lends a row, ignoring timing. */
+function statusTone(code) {
+  const tone = STATUS[code] && STATUS[code].tone;
+  return tone === 'alert' || tone === 'warn' ? tone : '';
 }
 
 function formatEventDate(value, hass) {
-  const date = parseLocalDateTime(value);
+  const date = eventDate({ date: value });
   if (!date) return '';
   return `${formatDate(date, hass)}, ${formatTime(date, hass)}`;
 }
@@ -643,6 +766,7 @@ const STYLES = `
   .count.soon { color: var(--primary-color); }
   .count.alert { color: var(--error-color); }
   .count.done { color: var(--success-color, var(--label-badge-green)); }
+  .count.warn { color: var(--warning-color, var(--label-badge-yellow)); }
   .count.muted { color: var(--secondary-text-color); }
 
   .text {
@@ -669,6 +793,7 @@ const STYLES = `
     white-space: nowrap;
   }
   .sub.alert { color: var(--error-color); }
+  .sub.warn { color: var(--warning-color, var(--label-badge-yellow)); }
 
   .chevron {
     flex: 0 0 auto;
@@ -801,7 +926,8 @@ class ParcelCountdownCard extends HTMLElement {
     const signature = JSON.stringify([
       this._config,
       message,
-      rows.map((r) => [r.id, r.name, r.days, r.code, r.carrier, r.tracking,
+      rows.map((r) => [r.id, r.name, r.days, r.sortDay, r.deliveredDays,
+        r.code, r.carrier, r.tracking,
         r.eta ? r.eta.getTime() : null, r.hasTime,
         r.window ? r.window.getTime() : null,
         r.event ? [r.event.event, r.event.date, r.event.location, r.event.additional] : null]),
@@ -880,7 +1006,8 @@ class ParcelCountdownCard extends HTMLElement {
       `<div class="count ${countdownTone(row)}">${countdownGlyph(row)}</div>` +
       '<div class="text">' +
       `<div class="name">${escapeHtml(row.name)}</div>` +
-      `<div class="sub${statusIsAlert(row.code) ? ' alert' : ''}">${escapeHtml(sub)}</div>` +
+      `<div class="sub${statusTone(row.code) ? ` ${statusTone(row.code)}` : ''}">` +
+      `${escapeHtml(sub)}</div>` +
       '</div>' +
       '<div class="chevron">❯</div>' +
       '</div>' +

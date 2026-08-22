@@ -7,8 +7,18 @@
       "status_code": 2,
       "date_expected": "2026-08-22 00:00:00",
       "events": [
-        { "event": "Departed facility", "date": "2026-08-19 04:12:00", "location": "Castle Donington, GB", "additional": "" },
-        { "event": "Arrived at facility", "date": "2026-08-20 06:30:00", "location": "Tamworth, GB", "additional": "" }
+        {
+          "event": "Departed facility",
+          "date": "2026-08-19 04:12:00",
+          "location": "Castle Donington, GB",
+          "additional": ""
+        },
+        {
+          "event": "Arrived at facility",
+          "date": "2026-08-20 06:30:00",
+          "location": "Tamworth, GB",
+          "additional": ""
+        }
       ]
     },
     {
@@ -20,7 +30,12 @@
       "date_expected_end": "2026-08-20 13:00:00",
       "timestamp_expected": 1787216400,
       "events": [
-        { "event": "Out for delivery", "date": "2026-08-20 07:02:00", "location": "Local depot", "additional": "" }
+        {
+          "event": "Out for delivery",
+          "date": "2026-08-20 07:02:00",
+          "location": "Local depot",
+          "additional": ""
+        }
       ]
     },
     {
@@ -37,7 +52,12 @@
       "status_code": 1,
       "date_expected": "2026-08-17 00:00:00",
       "events": [
-        { "event": "In transit, arriving late", "date": "2026-08-18 11:00:00", "location": "ISC New York", "additional": "Delay" }
+        {
+          "event": "In transit, arriving late",
+          "date": "2026-08-18 11:00:00",
+          "location": "ISC New York",
+          "additional": "Delay"
+        }
       ]
     },
     {
@@ -46,14 +66,28 @@
       "carrier_code": "dpd",
       "status_code": 0,
       "date_expected": "2026-08-18 00:00:00",
-      "events": [{ "event": "Delivered", "date": "2026-08-18 14:22:00", "location": "Front porch", "additional": "" }]
+      "events": [
+        {
+          "event": "Delivered",
+          "date": "2026-08-18 14:22:00",
+          "location": "Front porch",
+          "additional": ""
+        }
+      ]
     },
     {
       "tracking_number": "NODESC0001",
       "carrier_code": "fedex",
       "status_code": 7,
       "date_expected": "2026-08-25 00:00:00",
-      "events": [{ "event": "Customs hold", "date": "2026-08-19 09:00:00", "location": "Stansted", "additional": "Duty due" }]
+      "events": [
+        {
+          "event": "Customs hold",
+          "date": "2026-08-19 09:00:00",
+          "location": "Stansted",
+          "additional": "Duty due"
+        }
+      ]
     },
     {
       "description": "Failed attempt parcel",
@@ -85,9 +119,21 @@
       "carrier_code": "inpost",
       "status_code": 3,
       "date_expected": "2026-08-20 18:00:00",
-      "events": [{ "event": "Ready for collection", "date": "2026-08-20 12:00:00", "location": "Locker 42", "additional": "" }]
+      "events": [
+        {
+          "event": "Ready for collection",
+          "date": "2026-08-20 12:00:00",
+          "location": "Locker 42",
+          "additional": ""
+        }
+      ]
     },
-    { "tracking_number": "NULLROW", "carrier_code": "", "status_code": 5, "events": null },
+    {
+      "tracking_number": "NULLROW",
+      "carrier_code": "",
+      "status_code": 5,
+      "events": null
+    },
     {
       "description": "Epoch milliseconds parcel",
       "tracking_number": "MS0006",
@@ -95,6 +141,47 @@
       "status_code": 2,
       "timestamp_expected": 1787616000000,
       "events": []
+    },
+    {
+      "description": "Worded event dates, no estimate",
+      "tracking_number": "WD0008",
+      "carrier_code": "fedex",
+      "status_code": 0,
+      "events": [
+        {
+          "event": "Delivered",
+          "date": "August 17, 2026 09:19",
+          "location": "New York, NY",
+          "additional": ""
+        },
+        {
+          "event": "On vehicle for delivery",
+          "date": "August 17, 2026 07:10",
+          "location": "Brooklyn, NY",
+          "additional": ""
+        }
+      ]
+    },
+    {
+      "description": "Twelve-hour event dates",
+      "tracking_number": "TW0009",
+      "carrier_code": "usps",
+      "status_code": 2,
+      "date_expected": "2026-08-24 00:00:00",
+      "events": [
+        {
+          "event": "Arrived at USPS Facility",
+          "date": "August 22, 2026 7:37 AM",
+          "location": "JERSEY CITY NJ",
+          "additional": ""
+        },
+        {
+          "event": "In Transit to Next Facility",
+          "date": "August 21, 2026 12:16 PM",
+          "location": "",
+          "additional": ""
+        }
+      ]
     }
   ]
 }

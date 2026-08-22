@@ -100,7 +100,18 @@ test('hides delivered packages by default', () => {
 });
 test('a wide retention window brings delivered packages back', () => {
   const kept = card.buildRows(deliveries, { hide_delivered_after: 30 }, NOW);
-  assert.equal(kept.length, rows.length + 1);
+  const delivered = deliveries.filter((d) => d.status_code === 0).length;
+  assert.equal(kept.length, rows.length + delivered);
+});
+test('a delivered package dated only by a worded event is hidden on time', () => {
+  // Its arrival exists solely as "August 17, 2026 09:19". If that fails to
+  // parse it counts as having just landed and wrongly survives the filter.
+  const ids = card.buildRows(deliveries, {}, NOW).map((r) => r.tracking);
+  assert.ok(!ids.includes('WD0008'), 'delivered 3 days ago, retention is 1 day');
+  assert.ok(
+    card.buildRows(deliveries, { hide_delivered_after: 30 }, NOW)
+      .map((r) => r.tracking).includes('WD0008'),
+  );
 });
 test('sorts soonest first', () => {
   const dated = rows.filter((r) => r.days !== null).map((r) => r.days);
@@ -168,7 +179,7 @@ test('0 today, ! overdue, – undated, ✓ delivered', () => {
   assert.equal(card.countdownGlyph({ code: 2, days: 12 }), '12');
 });
 test('tone classes', () => {
-  assert.equal(card.countdownTone({ code: 2, days: -1 }), 'alert');
+  assert.equal(card.countdownTone({ code: 2, days: -1 }), 'warn');
   assert.equal(card.countdownTone({ code: 2, days: 0 }), 'soon');
   assert.equal(card.countdownTone({ code: 2, days: 1 }), '');
   assert.equal(card.countdownTone({ code: 2, days: 5 }), '');
@@ -229,11 +240,27 @@ test('counts both hidden categories', () => {
     { description: 'A', tracking_number: 'A', status_code: 0, date_expected: '2026-08-18 00:00:00' },
     { description: 'B', tracking_number: 'B', status_code: 2 },
   ];
-  const hint = card.describeFilters(mixed, { show_no_eta: false });
-  assert.match(hint, /1 delivered and 1 with no delivery estimate/);
+  const hint = card.describeFilters(mixed, { show_no_eta: false }, NOW);
+  assert.match(hint, /1 delivered more than 1 day ago and 1 with no delivery estimate/);
 });
 test('falls back to a generic count when no filter explains it', () => {
-  assert.match(card.describeFilters([{ status_code: 2 }], {}), /All 1 package is hidden/);
+  assert.match(card.describeFilters([{ status_code: 2 }], {}, NOW), /All 1 package is hidden/);
+});
+test('a delivery inside the retention window is not blamed on the filters', () => {
+  // Delivered today, kept for 30 days: nothing here was filtered out.
+  const recent = [{ tracking_number: 'R', status_code: 0, date_expected: '2026-08-20 00:00:00' }];
+  assert.match(card.describeFilters(recent, { hide_delivered_after: 30 }, NOW), /All 1 package is hidden/);
+});
+test('a stale delivery is reported with its age', () => {
+  const stale = [{ tracking_number: 'S', status_code: 0, date_expected: '2020-01-01 00:00:00' }];
+  assert.match(
+    card.describeFilters(stale, { hide_delivered_after: 30 }, NOW),
+    /1 delivered more than 30 days ago/,
+  );
+});
+test('a zero retention window is worded without a day count', () => {
+  const any = [{ tracking_number: 'Z', status_code: 0, date_expected: '2026-08-20 00:00:00' }];
+  assert.match(card.describeFilters(any, { hide_delivered_after: 0 }, NOW), /1 already delivered/);
 });
 
 console.log('tracking links');
@@ -450,6 +477,166 @@ test('deliveredAt is null when nothing is dated', () => {
 test('show_no_eta does not strip an undated delivered package', () => {
   const undated = [{ description: 'No dates', tracking_number: 'U', status_code: 0 }];
   assert.equal(card.buildRows(undated, { show_no_eta: false, hide_delivered_after: 1 }, NOW).length, 1);
+});
+
+console.log('severity tiers');
+test('exceptions and failed attempts are red', () => {
+  assert.equal(card.countdownTone({ code: 6, days: 2 }), 'alert');
+  assert.equal(card.countdownTone({ code: 7, days: 2 }), 'alert');
+});
+test('an overdue exception stays red rather than softening to amber', () => {
+  assert.equal(card.countdownTone({ code: 7, days: -4 }), 'alert');
+});
+test('stalled and awaiting pickup are amber even when on time', () => {
+  assert.equal(card.countdownTone({ code: 1, days: 3 }), 'warn');
+  assert.equal(card.countdownTone({ code: 3, days: 3 }), 'warn');
+});
+test('merely overdue is amber, not red', () => {
+  assert.equal(card.countdownTone({ code: 2, days: -3 }), 'warn');
+  assert.equal(card.countdownGlyph({ code: 2, days: -3 }), '!');
+});
+test('not found is a muted question mark whatever its dates say', () => {
+  for (const days of [-5, 0, 5, null]) {
+    assert.equal(card.countdownGlyph({ code: 5, days }), '?');
+    assert.equal(card.countdownTone({ code: 5, days }), 'muted');
+  }
+});
+test('delivered outranks every other tier', () => {
+  assert.equal(card.countdownTone({ code: 0, days: -9 }), 'done');
+  assert.equal(card.countdownGlyph({ code: 0, days: -9 }), '✓');
+});
+test('ordinary statuses stay unstyled', () => {
+  assert.equal(card.countdownTone({ code: 2, days: 4 }), '');
+  assert.equal(card.countdownTone({ code: 4, days: 2 }), '');
+  assert.equal(card.countdownTone({ code: 8, days: 9 }), '');
+});
+
+console.log('date and time display');
+test('a date in another year carries the year', () => {
+  const rows = card.buildRows([
+    { tracking_number: 'NY', status_code: 8, date_expected: '2027-03-01 00:00:00' },
+    { tracking_number: 'TY', status_code: 8, date_expected: '2026-09-01 00:00:00' },
+  ], {}, NOW);
+  const shown = rows.map((r) => new Intl.DateTimeFormat('en-GB', {
+    weekday: 'short', day: 'numeric', month: 'short',
+    ...(r.eta.getFullYear() === new Date().getFullYear() ? {} : { year: 'numeric' }),
+  }).format(r.eta));
+  assert.ok(shown.some((t) => /2027/.test(t)), 'next year must show a year');
+  assert.ok(shown.some((t) => !/20\d\d/.test(t)), 'this year must not');
+});
+test('an epoch landing on local midnight is treated as date-only', () => {
+  const midnight = Math.floor(new Date(2026, 7, 23, 0, 0, 0).getTime() / 1000);
+  assert.equal(card.etaHasTime({ timestamp_expected: midnight }), false);
+});
+test('an epoch with a real time still counts as timed', () => {
+  const morning = Math.floor(new Date(2026, 7, 23, 9, 15, 0).getTime() / 1000);
+  assert.equal(card.etaHasTime({ timestamp_expected: morning }), true);
+});
+
+console.log('re-render guard');
+test('an ageing delivery changes the render signature', () => {
+  const d = [{ tracking_number: 'X1', status_code: 0,
+    events: [{ event: 'Delivered', date: '2026-08-20 09:00:00' }] }];
+  const key = (now) => JSON.stringify(card.buildRows(d, { hide_delivered_after: 10 }, now)
+    .map((r) => [r.id, r.name, r.days, r.sortDay, r.deliveredDays]));
+  const onTheDay = key(NOW);
+  const threeDaysOn = key(new Date(2026, 7, 23, 12, 0));
+  assert.notEqual(onTheDay, threeDaysOn, 'subtitle would freeze on "Delivered · Today"');
+});
+
+console.log('delivery date resolution');
+test('an ISO event date with an offset is understood', () => {
+  const d = { status_code: 0, events: [{ event: 'Delivered', date: '2026-08-20T09:00:00+01:00' }] };
+  const at = card.deliveredAt(d, null);
+  assert.ok(at instanceof Date && !Number.isNaN(at.getTime()));
+});
+test('a date on an earlier event is used when the last one has none', () => {
+  const d = { status_code: 0, events: [
+    { event: 'Delivered', location: 'Porch' },
+    { event: 'Out for delivery', date: '2026-08-20 07:00:00' },
+  ] };
+  assert.equal(card.deliveredAt(d, null).getDate(), 20);
+});
+test('the newest event date wins regardless of array order', () => {
+  const d = { status_code: 0, events: [
+    { event: 'Arrived', date: '2026-08-18 07:00:00' },
+    { event: 'Delivered', date: '2026-08-20 11:00:00' },
+    { event: 'Departed', date: '2026-08-19 07:00:00' },
+  ] };
+  assert.equal(card.deliveredAt(d, null).getDate(), 20);
+});
+test('unusable event dates fall through to the estimate', () => {
+  const d = { status_code: 0, date_expected: '2026-08-19 00:00:00',
+    events: [{ event: 'Delivered', date: 'sometime last week' }] };
+  assert.equal(card.deliveredAt(d, card.parseEta(d)).getDate(), 19);
+});
+test('no dates anywhere still yields null', () => {
+  assert.equal(card.deliveredAt({ status_code: 0, events: [{ event: 'Delivered' }] }, null), null);
+});
+test('eventDate rejects junk rather than inventing a date', () => {
+  assert.equal(card.eventDate({ date: '' }), null);
+  assert.equal(card.eventDate({ date: 'not a date' }), null);
+  assert.equal(card.eventDate({}), null);
+  assert.equal(card.eventDate(null), null);
+});
+
+console.log('real-world date formats');
+// parcel-ha does not normalise event dates. All three of these appear in a
+// single sensor payload, and two of them come from the same carrier.
+const FORMATS = [
+  ['2026-08-22 07:04:41', [2026, 7, 22, 7, 4, 41]],
+  ['August 22, 2026 09:19', [2026, 7, 22, 9, 19, 0]],
+  ['August 22, 2026 7:37 AM', [2026, 7, 22, 7, 37, 0]],
+  ['August 22, 2026 12:05 AM', [2026, 7, 22, 0, 5, 0]],
+  ['August 22, 2026 12:05 PM', [2026, 7, 22, 12, 5, 0]],
+  ['August 22, 2026 1:55 PM', [2026, 7, 22, 13, 55, 0]],
+  ['Aug 22 2026', [2026, 7, 22, 0, 0, 0]],
+];
+for (const [text, want] of FORMATS) {
+  test(`parses ${text}`, () => {
+    const d = card.parseLocalDateTime(text);
+    assert.ok(d, 'must not be null');
+    assert.deepEqual(
+      [d.getFullYear(), d.getMonth(), d.getDate(), d.getHours(), d.getMinutes(), d.getSeconds()],
+      want,
+    );
+  });
+}
+test('an offset-bearing string is read as an absolute instant', () => {
+  assert.equal(card.parseLocalDateTime('2026-08-22T07:04:41Z').getTime(), Date.UTC(2026, 7, 22, 7, 4, 41));
+});
+test('garbage and impossible dates are still rejected', () => {
+  for (const bad of ['not a date', '', 'August 45, 2026 09:19', '2026-02-31 00:00:00',
+                     'Smarch 4, 2026', 'August 22, 2026 29:19']) {
+    assert.equal(card.parseLocalDateTime(bad), null, bad);
+  }
+});
+
+test('a delivered package with no estimate still reports its arrival day', () => {
+  // FedEx: no date_expected at all, delivery time only in the event feed.
+  const fedex = {
+    carrier_code: 'fedex', description: 'Headphone amp', status_code: 0,
+    tracking_number: 'FX0000000001',
+    events: [
+      { event: 'Delivered', date: 'August 20, 2026 09:19', location: 'New York, NY' },
+      { event: 'On vehicle for delivery', date: 'August 20, 2026 07:10', location: 'Brooklyn, NY' },
+      { event: 'Shipment information sent', date: 'August 17, 2026 09:39' },
+    ],
+  };
+  const [row] = card.buildRows([fedex], { hide_delivered_after: 5 }, NOW);
+  assert.ok(row, 'must survive the retention filter');
+  assert.equal(row.eta, null, 'there is no estimate to fall back on');
+  assert.ok(row.deliveredAt, 'arrival must come from the events');
+  assert.equal(row.deliveredDays, 0);
+  assert.equal(row.deliveredAt.getHours(), 9);
+});
+test('the newest event wins even when the feed mixes formats', () => {
+  const mixed = { status_code: 2, tracking_number: 'MX1', events: [
+    { event: 'older', date: 'August 19, 2026 11:00 PM' },
+    { event: 'newest', date: '2026-08-20 06:30:00' },
+    { event: 'oldest', date: 'Aug 18 2026' },
+  ] };
+  assert.equal(card.latestEvent(mixed).event, 'newest');
 });
 
 console.log(`\n${passed} assertions passed${process.exitCode ? ', with failures' : ''}`);

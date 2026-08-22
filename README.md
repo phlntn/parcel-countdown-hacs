@@ -17,8 +17,9 @@ page.
 | `4` | days until the estimated delivery |
 | `0` | arriving today |
 | `!` | past its estimate |
+| `?` | the carrier cannot find it |
 | `–` | no date from the carrier |
-| `✓` | delivered, shown in green — see `hide_delivered_after` |
+| `✓` | delivered — see `hide_delivered_after` |
 
 Counts are calendar days measured at local midnight, and roll over without
 waiting for a state update. Only `0` is highlighted; everything further out
@@ -103,15 +104,25 @@ and punctuation-insensitively. Only `http` and `https` URLs are used.
 
 ## Status codes
 
-| Code | Meaning | | Code | Meaning |
-|---|---|---|---|---|
-| `0` | Delivered | | `5` | Not found |
-| `1` | Stalled | | `6` | Failed attempt |
-| `2` | In transit | | `7` | Exception |
-| `3` | Awaiting pickup | | `8` | Label created |
-| `4` | Out for delivery | | | |
+| Code | Meaning | Colour |
+|---|---|---|
+| `0` | Delivered | green |
+| `1` | Stalled | amber |
+| `2` | In transit | — |
+| `3` | Awaiting pickup | amber |
+| `4` | Out for delivery | — |
+| `5` | Not found | grey, shown as `?` |
+| `6` | Failed attempt | red |
+| `7` | Exception | red |
+| `8` | Label created | — |
 
-Codes `1`, `5`, `6` and `7` are shown in the theme's error colour.
+Red is reserved for something actually going wrong. Amber means it needs a
+nudge — including any package past its estimate, whatever its status. A parcel
+the carrier cannot find stays grey rather than shouting, since there is nothing
+to act on. Status severity outranks timing, so an overdue exception stays red.
+
+Colours come from the theme's `--success-color`, `--warning-color` and
+`--error-color`, so they follow whatever palette you use.
 
 ## Troubleshooting
 
