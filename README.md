@@ -48,7 +48,12 @@ Shipment Data**, then reload the integration when prompted.
 
 **2. Install the card.** HACS → ⋮ → **Custom repositories** → add
 `https://github.com/phlntn/parcel-countdown-hacs` with type **Dashboard**,
-install, then hard-reload the browser.
+then install. In the download dialog, pick **main** from the version dropdown —
+this repo has no releases, and `main` is always the current card. Hard-reload
+the browser afterwards.
+
+Updates work the same way: HACS reports a new commit on `main` as an available
+update, and redownloading fetches it.
 
 HACS registers the dashboard resource itself. To add it by hand — or after
 copying `dist/parcel-countdown-hacs.js` into `config/www/` for a manual
@@ -138,7 +143,15 @@ Colours come from the theme's `--success-color`, `--warning-color` and
 Custom cards live under the **By card** tab of the *Add card* dialog, not **By
 entity**. If the card is missing from the picker, check the browser console for
 a `PARCEL-COUNTDOWN-CARD` banner — no banner means the module never loaded, so
-recheck the resource path and hard-reload.
+recheck the resource path and hard-reload. If the card loads but behaves like
+an older copy, HACS is serving a stale file: redownload it, then hard-reload.
+The browser caches this module aggressively.
+
+## Versioning
+
+There isn't any. HACS tracks `main`, so the newest commit is the current
+release and there is nothing to tag or bump. HACS shows the installed commit
+in its own UI, which is also how you confirm an update actually landed.
 
 ## Development
 
