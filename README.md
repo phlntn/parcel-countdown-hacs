@@ -7,8 +7,10 @@ days remaining on the left, package name on the right.
 
 Reads the `deliveries` attribute published by the
 [`parcel-ha`](https://github.com/jmdevita/parcel-ha) integration, which wraps
-the [Parcel](https://parcelapp.net) API. Rows sort soonest-first, undated last.
-Clicking a row opens the carrier's tracking page.
+the [Parcel](https://parcelapp.net) API. Rows read as one timeline — furthest
+in the past at the top, running forward into the future, undated last — so
+recently delivered packages lead. Clicking a row opens the carrier's tracking
+page.
 
 | Glyph | Meaning |
 |---|---|
@@ -16,10 +18,15 @@ Clicking a row opens the carrier's tracking page.
 | `0` | arriving today |
 | `!` | past its estimate |
 | `–` | no date from the carrier |
-| `✓` | delivered — hidden by default |
+| `✓` | delivered, shown in green — see `hide_delivered_after` |
 
 Counts are calendar days measured at local midnight, and roll over without
-waiting for a state update.
+waiting for a state update. Only `0` is highlighted; everything further out
+stays in the normal text colour.
+
+A delivered package reports when it arrived — "Delivered · Today", "Delivered ·
+Yesterday", then a date — taken from its last tracking event, or its expected
+date if the carrier logged no events.
 
 ## Requirements
 
@@ -71,7 +78,7 @@ title: Packages
 | `max` | 0–999 | `0` | Maximum packages to show. `0` shows all. |
 | `number_size` | 12–96 | `32` | Size of the day-count, in px. |
 | `show_no_eta` | boolean | `true` | Show packages with no estimated date. |
-| `show_delivered` | boolean | `false` | Show delivered packages. |
+| `hide_delivered_after` | 0–30 | `1` | Days to keep a delivered package on the card. `0` drops it the moment it arrives, `1` keeps it for the rest of the delivery day, `2` also keeps yesterday's. |
 | `carriers` | map | *(none)* | Tracking URLs by `carrier_code`. See below. |
 
 Every option is editable in the GUI editor.
@@ -114,7 +121,7 @@ Codes `1`, `5`, `6` and `7` are shown in the theme's error colour.
 | **No "deliveries" attribute** | Wrong sensor. `Parcel Active Shipment` and `Parcel Recent Shipment` carry only a count; use the raw shipment sensor. |
 | **Unavailable / unknown** | The Parcel App integration is not reporting. |
 | **No packages** | Working, with nothing in transit. |
-| **Nothing to show** | Packages exist but are filtered out. Enable `show_delivered` or `show_no_eta`. |
+| **Nothing to show** | Packages exist but are filtered out. Raise `hide_delivered_after` or enable `show_no_eta`. |
 | **A row opens a search** | That `carrier_code` is not built in. Add it under `carriers`. |
 
 Custom cards live under the **By card** tab of the *Add card* dialog, not **By

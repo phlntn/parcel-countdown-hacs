@@ -36,7 +36,7 @@ const DEFAULTS = {
   max: 0,
   number_size: 32,
   show_no_eta: true,
-  show_delivered: false,
+  hide_delivered_after: 1,
   carriers: {},
 };
 
@@ -47,6 +47,7 @@ const LIMITS = {
   columns: { min: 1, max: 3 },
   max: { min: 0, max: 999 },
   number_size: { min: 12, max: 96 },
+  hide_delivered_after: { min: 0, max: 30 },
 };
 
 /**
@@ -210,9 +211,23 @@ export function latestEvent(delivery) {
 }
 
 /**
+ * When a delivered package was delivered: the last tracking event if there is
+ * one, otherwise the expected date.
+ *
+ * @returns {Date|null}
+ */
+export function deliveredAt(delivery, eta) {
+  const event = latestEvent(delivery);
+  const stamped = event ? parseLocalDateTime(event.date) : null;
+  return stamped || eta || null;
+}
+
+/**
  * Turn the raw `deliveries` attribute into sorted, filtered view rows.
  *
- * Sort order: soonest ETA first, undated packages last (by name).
+ * Sort order: one chronological timeline — furthest in the past first, running
+ * forward into the future, undated packages last. Delivered packages are
+ * placed by when they arrived, so they lead naturally rather than by rule.
  *
  * @returns {Array<{id:string,name:string,days:number|null,eta:Date|null,
  *   hasTime:boolean,code:number|null,carrier:string,tracking:string,
@@ -220,8 +235,10 @@ export function latestEvent(delivery) {
  */
 export function buildRows(deliveries, config = {}, now = new Date()) {
   const list = Array.isArray(deliveries) ? deliveries : [];
-  const showDelivered = config.show_delivered === true;
   const showNoEta = config.show_no_eta !== false;
+  const hideAfter = Number.isFinite(Number(config.hide_delivered_after))
+    ? Math.max(0, Number(config.hide_delivered_after))
+    : DEFAULTS.hide_delivered_after;
 
   const rows = [];
   list.forEach((delivery, index) => {
@@ -230,10 +247,20 @@ export function buildRows(deliveries, config = {}, now = new Date()) {
     const code = Number.isFinite(Number(delivery.status_code))
       ? Number(delivery.status_code)
       : null;
-    if (code === DELIVERED && !showDelivered) return;
 
     const eta = parseEta(delivery);
-    if (eta === null && !showNoEta) return;
+    const delivered = code === DELIVERED;
+    const settled = delivered ? deliveredAt(delivery, eta) : null;
+
+    if (delivered) {
+      // `hide_delivered_after` counts calendar days: 0 hides on arrival, 1
+      // keeps it for the rest of the delivery day. An undated delivery is
+      // treated as having just landed.
+      const since = settled ? -daysUntil(settled, now) : 0;
+      if (since >= hideAfter) return;
+    } else if (eta === null && !showNoEta) {
+      return;
+    }
 
     const tracking = String(delivery.tracking_number || '').trim();
     const name = String(delivery.description || '').trim() || tracking || 'Package';
@@ -245,6 +272,13 @@ export function buildRows(deliveries, config = {}, now = new Date()) {
       eta,
       hasTime: etaHasTime(delivery),
       window: etaWindowEnd(delivery, eta),
+      delivered,
+      deliveredAt: settled,
+      deliveredDays: settled ? daysUntil(settled, now) : null,
+      // One timeline: a delivered package is placed by when it arrived, a
+      // pending one by when it is due. An undated delivery counts as now.
+      sortDay: delivered ? (settled ? daysUntil(settled, now) : 0) : daysUntil(eta, now),
+      sortAt: delivered ? settled || now : eta,
       code,
       carrier: String(delivery.carrier_code || '').trim(),
       tracking,
@@ -252,11 +286,21 @@ export function buildRows(deliveries, config = {}, now = new Date()) {
     });
   });
 
+  // Oldest first, running forward into the future; undated packages last.
   rows.sort((a, b) => {
-    if (a.eta && b.eta) return a.eta - b.eta || a.name.localeCompare(b.name);
-    if (a.eta) return -1;
-    if (b.eta) return 1;
-    return a.name.localeCompare(b.name);
+    if (a.sortDay === null || b.sortDay === null) {
+      if (a.sortDay === b.sortDay) return a.name.localeCompare(b.name);
+      return a.sortDay === null ? 1 : -1;
+    }
+    if (a.sortDay !== b.sortDay) return a.sortDay - b.sortDay;
+
+    // Same day: what already arrived precedes what is still due, since a
+    // date-only estimate reads as midnight and would otherwise jump ahead.
+    if (a.delivered !== b.delivered) return a.delivered ? -1 : 1;
+
+    const at = a.sortAt ? a.sortAt.getTime() : 0;
+    const bt = b.sortAt ? b.sortAt.getTime() : 0;
+    return at - bt || a.name.localeCompare(b.name);
   });
 
   const max = Number(config.max) || 0;
@@ -274,7 +318,7 @@ export function describeFilters(deliveries, config = {}) {
   ).length;
 
   const parts = [];
-  if (delivered && config.show_delivered !== true) {
+  if (delivered && Number(config.hide_delivered_after ?? DEFAULTS.hide_delivered_after) >= 0) {
     parts.push(`${delivered} delivered`);
   }
   if (noEta && config.show_no_eta === false) {
@@ -405,7 +449,7 @@ export function countdownTone(row) {
   if (row.code === DELIVERED) return 'done';
   if (row.days === null) return 'muted';
   if (row.days < 0) return 'alert';
-  if (row.days <= 1) return 'soon';
+  if (row.days === 0) return 'soon';
   return '';
 }
 
@@ -463,15 +507,19 @@ function formatTime(date, hass) {
   }
 }
 
+/** "Today" / "Tomorrow" / "Yesterday", else a short date. */
+function relativeDay(date, days, hass) {
+  if (days === 0) return 'Today';
+  if (days === 1) return 'Tomorrow';
+  if (days === -1) return 'Yesterday';
+  return formatDate(date, hass);
+}
+
 /** Human-readable ETA line, e.g. "Tomorrow, 09:00 – 13:00". */
 function formatEta(row, hass) {
   if (!row.eta) return 'No delivery estimate';
 
-  let label;
-  if (row.days === 0) label = 'Today';
-  else if (row.days === 1) label = 'Tomorrow';
-  else if (row.days === -1) label = 'Yesterday';
-  else label = formatDate(row.eta, hass);
+  const label = relativeDay(row.eta, row.days, hass);
 
   if (!row.hasTime) return label;
 
@@ -481,6 +529,21 @@ function formatEta(row, hass) {
     if (end) time = `${time} – ${end}`;
   }
   return time ? `${label}, ${time}` : label;
+}
+
+/**
+ * Secondary line under the package name. A delivered package reports when it
+ * arrived; an estimate is meaningless once it is in your hands.
+ */
+function rowSubtitle(row, hass) {
+  const label = statusLabel(row.code);
+
+  if (row.delivered) {
+    if (!row.deliveredAt) return label;
+    return `${label} · ${relativeDay(row.deliveredAt, row.deliveredDays, hass)}`;
+  }
+
+  return `${label} · ${formatEta(row, hass)}`;
 }
 
 function statusLabel(code) {
@@ -579,7 +642,7 @@ const STYLES = `
   }
   .count.soon { color: var(--primary-color); }
   .count.alert { color: var(--error-color); }
-  .count.done,
+  .count.done { color: var(--success-color, var(--label-badge-green)); }
   .count.muted { color: var(--secondary-text-color); }
 
   .text {
@@ -676,7 +739,7 @@ class ParcelCountdownCard extends HTMLElement {
       max: clampTo('max', config.max),
       number_size: clampTo('number_size', config.number_size),
       show_no_eta: config.show_no_eta !== false,
-      show_delivered: config.show_delivered === true,
+      hide_delivered_after: clampTo('hide_delivered_after', config.hide_delivered_after),
       carriers:
         config.carriers && typeof config.carriers === 'object' ? config.carriers : {},
     };
@@ -789,11 +852,11 @@ class ParcelCountdownCard extends HTMLElement {
 
   _rowHtml(row) {
     const hass = this._hass;
-    const sub = `${statusLabel(row.code)} · ${formatEta(row, hass)}`;
+    const sub = rowSubtitle(row, hass);
     const href = trackingUrl(row, this._config.carriers);
 
-    // Tracking number and last event live in the tooltip.
-    const tooltip = [row.name, sub];
+    // The tooltip carries only what the row does not already show.
+    const tooltip = [];
     if (row.tracking) {
       tooltip.push(row.carrier ? `${row.tracking} (${row.carrier})` : row.tracking);
     }
@@ -811,7 +874,7 @@ class ParcelCountdownCard extends HTMLElement {
       : '<div class="row"';
 
     return (
-      `${open} title="${escapeHtml(tooltip.join('\n'))}" ` +
+      `${open}${tooltip.length ? ` title="${escapeHtml(tooltip.join('\n'))}"` : ''} ` +
       `aria-label="${escapeHtml(`${row.name}, ${sub}`)}">` +
       '<div class="line">' +
       `<div class="count ${countdownTone(row)}">${countdownGlyph(row)}</div>` +
@@ -851,13 +914,17 @@ const FORM_SCHEMA = [
     },
   },
   {
-    type: 'grid',
-    name: '',
-    schema: [
-      { name: 'show_no_eta', selector: { boolean: {} } },
-      { name: 'show_delivered', selector: { boolean: {} } },
-    ],
+    name: 'hide_delivered_after',
+    selector: {
+      number: {
+        ...LIMITS.hide_delivered_after,
+        step: 1,
+        mode: 'slider',
+        unit_of_measurement: 'days',
+      },
+    },
   },
+  { name: 'show_no_eta', selector: { boolean: {} } },
   { name: 'carriers', selector: { object: {} } },
 ];
 
@@ -868,7 +935,7 @@ const FORM_LABELS = {
   max: 'Max packages (0 = all)',
   number_size: 'Number size',
   show_no_eta: 'Show packages with no ETA',
-  show_delivered: 'Show delivered packages',
+  hide_delivered_after: 'Hide delivered after (0 = as soon as it arrives)',
   carriers: 'Carrier tracking URLs (advanced) — carrier_code: template with {tracking}',
 };
 
@@ -938,7 +1005,11 @@ class ParcelCountdownCardEditor extends HTMLElement {
     if (size !== DEFAULTS.number_size) config.number_size = size;
 
     if (value.show_no_eta === false) config.show_no_eta = false;
-    if (value.show_delivered === true) config.show_delivered = true;
+
+    const keepDelivered = clampTo('hide_delivered_after', value.hide_delivered_after);
+    if (keepDelivered !== DEFAULTS.hide_delivered_after) {
+      config.hide_delivered_after = keepDelivered;
+    }
 
     if (
       value.carriers &&

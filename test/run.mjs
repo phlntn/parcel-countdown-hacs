@@ -98,9 +98,9 @@ const rows = card.buildRows(deliveries, {}, NOW);
 test('hides delivered packages by default', () => {
   assert.ok(!rows.some((r) => r.code === 0));
 });
-test('shows delivered packages when asked', () => {
-  const withDelivered = card.buildRows(deliveries, { show_delivered: true }, NOW);
-  assert.equal(withDelivered.length, rows.length + 1);
+test('a wide retention window brings delivered packages back', () => {
+  const kept = card.buildRows(deliveries, { hide_delivered_after: 30 }, NOW);
+  assert.equal(kept.length, rows.length + 1);
 });
 test('sorts soonest first', () => {
   const dated = rows.filter((r) => r.days !== null).map((r) => r.days);
@@ -170,7 +170,7 @@ test('0 today, ! overdue, – undated, ✓ delivered', () => {
 test('tone classes', () => {
   assert.equal(card.countdownTone({ code: 2, days: -1 }), 'alert');
   assert.equal(card.countdownTone({ code: 2, days: 0 }), 'soon');
-  assert.equal(card.countdownTone({ code: 2, days: 1 }), 'soon');
+  assert.equal(card.countdownTone({ code: 2, days: 1 }), '');
   assert.equal(card.countdownTone({ code: 2, days: 5 }), '');
   assert.equal(card.countdownTone({ code: 2, days: null }), 'muted');
   assert.equal(card.countdownTone({ code: 0, days: 0 }), 'done');
@@ -358,6 +358,98 @@ test('falls back to a name match when nothing carries deliveries', () => {
 test('falls back to the documented id with no hass at all', () => {
   assert.equal(card.findParcelEntity(undefined), 'sensor.parcel_raw_shipment_data');
   assert.equal(card.findParcelEntity({ states: {} }), 'sensor.parcel_raw_shipment_data');
+});
+
+console.log('delivered packages');
+const deliveredSet = [
+  { description: 'Landed today', tracking_number: 'D0', carrier_code: 'ups', status_code: 0,
+    date_expected: '2026-08-20 00:00:00',
+    events: [{ event: 'Delivered', date: '2026-08-20 08:30:00', location: 'Front desk' }] },
+  { description: 'Landed yesterday', tracking_number: 'D1', carrier_code: 'ups', status_code: 0,
+    date_expected: '2026-08-19 00:00:00',
+    events: [{ event: 'Delivered', date: '2026-08-19 16:00:00', location: 'Porch' }] },
+  { description: 'Landed three days ago', tracking_number: 'D3', carrier_code: 'ups', status_code: 0,
+    date_expected: '2026-08-17 00:00:00',
+    events: [{ event: 'Delivered', date: '2026-08-17 09:00:00', location: 'Porch' }] },
+  { description: 'Arriving tomorrow', tracking_number: 'T1', carrier_code: 'ups', status_code: 2,
+    date_expected: '2026-08-21 00:00:00' },
+];
+const kept = (n) => card.buildRows(deliveredSet, { hide_delivered_after: n }, NOW)
+  .map((r) => r.tracking);
+
+test('0 hides a delivery the moment it lands', () => {
+  assert.deepEqual(kept(0), ['T1']);
+});
+test('1 keeps it for the rest of the delivery day only', () => {
+  assert.deepEqual(kept(1), ['D0', 'T1']);
+});
+test('2 also keeps yesterday', () => {
+  assert.deepEqual(kept(2), ['D1', 'D0', 'T1']);
+});
+test('4 reaches back three days', () => {
+  assert.deepEqual(kept(4), ['D3', 'D1', 'D0', 'T1']);
+});
+test('rows read as one timeline, oldest first', () => {
+  const order = card.buildRows(deliveredSet, { hide_delivered_after: 30 }, NOW);
+  assert.deepEqual(order.map((r) => r.tracking), ['D3', 'D1', 'D0', 'T1']);
+  const days = order.map((r) => r.sortDay);
+  assert.deepEqual(days, [...days].sort((a, b) => a - b), 'sort keys must be monotonic');
+  assert.deepEqual(days, [-3, -1, 0, 1]);
+});
+test('an overdue package interleaves with deliveries of the same age', () => {
+  const mixed = [
+    ...deliveredSet,
+    { description: 'Overdue', tracking_number: 'OD', carrier_code: 'ups', status_code: 1,
+      date_expected: '2026-08-19 00:00:00' },
+  ];
+  const order = card.buildRows(mixed, { hide_delivered_after: 30 }, NOW)
+    .map((r) => r.tracking);
+  // OD is due 19 Aug, the same day D1 landed: delivered leads within a day.
+  assert.deepEqual(order, ['D3', 'D1', 'OD', 'D0', 'T1']);
+});
+test('a delivery precedes a same-day estimate', () => {
+  const sameDay = [
+    { description: 'Due today', tracking_number: 'DUE', status_code: 2, date_expected: '2026-08-20 00:00:00' },
+    { description: 'Arrived today', tracking_number: 'GOT', status_code: 0,
+      date_expected: '2026-08-20 00:00:00',
+      events: [{ event: 'Delivered', date: '2026-08-20 09:15:00' }] },
+  ];
+  const order = card.buildRows(sameDay, { hide_delivered_after: 1 }, NOW).map((r) => r.tracking);
+  assert.deepEqual(order, ['GOT', 'DUE']);
+});
+test('an undated delivery counts as having just landed', () => {
+  const undated = [{ description: 'No dates', tracking_number: 'U', status_code: 0 }];
+  assert.equal(card.buildRows(undated, { hide_delivered_after: 1 }, NOW).length, 1);
+  assert.equal(card.buildRows(undated, { hide_delivered_after: 0 }, NOW).length, 0);
+});
+test('the retention window defaults to the delivery day', () => {
+  assert.deepEqual(card.buildRows(deliveredSet, {}, NOW).map((r) => r.tracking), ['D0', 'T1']);
+});
+test('undated packages still sort last', () => {
+  const withUndated = [
+    ...deliveredSet,
+    { description: 'No estimate', tracking_number: 'NE', status_code: 8 },
+  ];
+  const order = card.buildRows(withUndated, { hide_delivered_after: 30 }, NOW)
+    .map((r) => r.tracking);
+  assert.equal(order[order.length - 1], 'NE');
+});
+test('deliveredAt prefers the last tracking event over the estimate', () => {
+  const d = deliveredSet[0];
+  const at = card.deliveredAt(d, card.parseEta(d));
+  assert.equal(at.getHours(), 8);
+  assert.equal(at.getMinutes(), 30);
+});
+test('deliveredAt falls back to the estimate with no events', () => {
+  const d = { status_code: 0, date_expected: '2026-08-19 00:00:00' };
+  assert.equal(card.deliveredAt(d, card.parseEta(d)).getDate(), 19);
+});
+test('deliveredAt is null when nothing is dated', () => {
+  assert.equal(card.deliveredAt({ status_code: 0 }, null), null);
+});
+test('show_no_eta does not strip an undated delivered package', () => {
+  const undated = [{ description: 'No dates', tracking_number: 'U', status_code: 0 }];
+  assert.equal(card.buildRows(undated, { show_no_eta: false, hide_delivered_after: 1 }, NOW).length, 1);
 });
 
 console.log(`\n${passed} assertions passed${process.exitCode ? ', with failures' : ''}`);
